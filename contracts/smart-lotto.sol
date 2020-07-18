@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity >=0.4.26 <0.7.0;
+pragma solidity >=0.6.0 <=0.6.11;
 
 
 contract SmartLotto {
@@ -11,23 +11,17 @@ contract SmartLotto {
     event SentExtraEvent(address indexed _from, address indexed _to, uint8 _box, bool _isSmartDirect);
     event UpgradeStatusEvent(address indexed _user, address indexed _sponsor, uint8 _box, bool _isSmartDirect);
     
-    enum NodeChieldType {
-        Inactive,
-        InvitedByYou,
-        BottomOverflow,
-        UpOverflow,
-        SurpassedSponsor
-    }
-
-    struct SmartDirectBox {
+    struct SmartTeamBox {
         bool purchased;
         bool inactive;
         uint reinvests;
-        address[] childs;
+        address closedAddr;
+        address[] firstLevelChilds;
+        address[] secondLevelChilds;
         address currentSponsor;
     }
 
-    struct SmartTeamBox {
+    struct SmartDirectBox {
         bool purchased;
         bool inactive;
         uint reinvests;
@@ -73,7 +67,9 @@ contract SmartLotto {
     
     modifier validNewUser(address _newUser) {
         uint32 size;
-        assembly { size := extcodesize(_newUser) }
+        assembly {
+            size := extcodesize(_newUser)
+        }
         require(size == 0, "The new user cannot be a contract");
         require(users[_newUser].id == 0, "This user already exists");
         _;
@@ -123,9 +119,7 @@ contract SmartLotto {
         
         userNode.directBoxes[1].currentSponsor = _sponsor;
         modifySmartDirectSponsor(_sponsor, _newUser, 1);
-        
-        // todo: Modify SmartTeamSponsor
-        
+        modifySmartTeamSponsor(_sponsor, _newUser, 1);
         emit SignUpEvent(_newUser, userNode.id, _sponsor,  users[_sponsor].id);
     }
 
@@ -136,28 +130,26 @@ contract SmartLotto {
     function buyNewBox(uint8 _matrix, uint8 _box) external payable onlyUser validBox(_box) {
         require(_matrix == 1 || _matrix == 2, "Invalid matrix");
         require(msg.value == boxesValues[_box - 1], "Please enter required amount");
-        User storage userData = users[msg.sender];
         if (_matrix == 1) {
-            require(!userData.directBoxes[_box].purchased, "You already bought that box");
-            require(userData.directBoxes[_box - 1].purchased, "Please bought the boxes prior to this");
+            require(!users[msg.sender].directBoxes[_box].purchased, "You already bought that box");
+            require(users[msg.sender].directBoxes[_box - 1].purchased, "Please bought the boxes prior to this");
             
-            userData.directBoxes[_box].purchased = true;
-            userData.directBoxes[_box - 1].inactive = false;
-            address sponsorResult = findSmartDirectSponsor(msg.sender, _box);
-            userData.directBoxes[_box].currentSponsor = sponsorResult;
+            users[msg.sender].directBoxes[_box].purchased = true;
+            users[msg.sender].directBoxes[_box - 1].inactive = false;
+            address sponsorResult = findSponsor(msg.sender, _box, true);
+            users[msg.sender].directBoxes[_box].currentSponsor = sponsorResult;
             modifySmartDirectSponsor(sponsorResult, msg.sender, _box);
             emit UpgradeStatusEvent(msg.sender, sponsorResult, _box, true);
         } else {
-            require(!userData.teamBoxes[_box].purchased, "level already activatedYou already bought that box"); 
-            require(userData.teamBoxes[_box - 1].purchased, "Please bought the boxes prior to this");
-            //todo: Implementation for SmartTeam
+            require(!users[msg.sender].teamBoxes[_box].purchased, "You already bought that box"); 
+            require(users[msg.sender].teamBoxes[_box - 1].purchased, "Please bought the boxes prior to this");
+            
+            users[msg.sender].teamBoxes[_box].purchased = true;
+            users[msg.sender].teamBoxes[_box - 1].inactive = false;
+            address sponsorResult = findSponsor(msg.sender, _box, false);
+            modifySmartTeamSponsor(sponsorResult, msg.sender, _box);
+            emit UpgradeStatusEvent(msg.sender, sponsorResult, _box, false);
         }
-    }
-    
-    function findSmartDirectSponsor(address _addr, uint8 _box) internal view returns(address) {
-        User memory node = users[_addr];
-        if (users[node.sponsor].directBoxes[_box].purchased) return node.sponsor;
-        return findSmartDirectSponsor(node.sponsor, _box);
     }
 
     function modifySmartDirectSponsor(address _sponsor, address _user, uint8 _box) private {
@@ -171,7 +163,7 @@ contract SmartLotto {
         if (!users[_sponsor].directBoxes[_box + 1].purchased && _box != 14) directData.inactive = true;
         directData.reinvests++;
         if (externalAddress != _sponsor) {
-            address sponsorResult = findSmartDirectSponsor(_sponsor, _box);
+            address sponsorResult = findSponsor(_sponsor, _box, true);
             directData.currentSponsor = sponsorResult;
             emit ReinvestBoxEvent(_sponsor, sponsorResult, _user, _box, true);
             modifySmartDirectSponsor(sponsorResult, _sponsor, _box);
@@ -181,13 +173,118 @@ contract SmartLotto {
         }
     }
 
+    function findSponsor(address _addr, uint8 _box, bool _isSmartDirect) internal view returns(address) {
+        User memory node = users[_addr];
+        bool purchased;
+        if (_isSmartDirect) purchased = users[node.sponsor].directBoxes[_box].purchased;
+        else purchased = users[node.sponsor].teamBoxes[_box].purchased;
+        if (purchased) return node.sponsor;
+        return findSponsor(node.sponsor, _box, _isSmartDirect);
+    }
+    
+    function modifySmartTeamSponsor(address _sponsor, address _user, uint8 _box) private {
+        SmartTeamBox storage sponsorBoxData = users[_sponsor].teamBoxes[_box];
+        
+        if (sponsorBoxData.firstLevelChilds.length < 2) {
+            sponsorBoxData.firstLevelChilds.push(_user);
+            users[_user].teamBoxes[_box].currentSponsor = _sponsor;
+            emit NewUserChildEvent(_user, _sponsor, _box, false, uint8(sponsorBoxData.firstLevelChilds.length));
+            
+            if (_sponsor == externalAddress)
+                return applyDistribution(_user, _sponsor, _box, false);
+            
+            address currentSponsor = sponsorBoxData.currentSponsor;
+            users[currentSponsor].teamBoxes[_box].secondLevelChilds.push(_user);
+            
+            uint len = users[currentSponsor].teamBoxes[_box].firstLevelChilds.length;
+            
+            for(uint8 i = 0; i < len; i++) {
+                if(users[currentSponsor].teamBoxes[_box].firstLevelChilds[i] == _sponsor)
+                    emit NewUserChildEvent(_user, currentSponsor, _box, false, uint8((2 * i) + sponsorBoxData.firstLevelChilds.length));
+            }
+
+            return modifySmartTeamSecondLevel(_user, currentSponsor, _box);
+        }
+        
+        sponsorBoxData.secondLevelChilds.push(_user);
+
+        if (sponsorBoxData.closedAddr != address(0)) {
+            uint8 index;
+            if (sponsorBoxData.firstLevelChilds[0] == sponsorBoxData.closedAddr) {
+                index = 1;
+            }
+            modifySmartTeam(_sponsor, _user, _box, index);
+            return modifySmartTeamSecondLevel(_user, _sponsor, _box);
+        }
+
+        for(uint8 i = 0;i < 2;i++) {
+            if(sponsorBoxData.firstLevelChilds[i] == _user) {
+                modifySmartTeam(_sponsor, _user, _box, i^1);
+                return modifySmartTeamSecondLevel(_user, _sponsor, _box);
+            }
+        }
+        uint8 index = 1;
+        if (users[sponsorBoxData.firstLevelChilds[0]].teamBoxes[_box].firstLevelChilds.length <= 
+            users[sponsorBoxData.firstLevelChilds[1]].teamBoxes[_box].firstLevelChilds.length) {
+            index = 0;
+        }
+        modifySmartTeam(_sponsor, _user, _box, index);
+        modifySmartTeamSecondLevel(_user, _sponsor, _box);
+    }
+
+    function modifySmartTeam(address _sponsor, address _user, uint8 _box, uint8 _index) private {
+        User storage userData = users[_user];
+        User storage sponsorData = users[_sponsor];
+        address chieldAddress = sponsorData.teamBoxes[_box].firstLevelChilds[_index];
+        User storage childData = users[chieldAddress];
+        childData.teamBoxes[_box].firstLevelChilds.push(_user);
+        uint8 length = uint8(childData.teamBoxes[_box].firstLevelChilds.length);
+        uint position = (2**(_index + 1)) + length;
+        emit NewUserChildEvent(_user, chieldAddress, _box, false, length);
+        emit NewUserChildEvent(_user, _sponsor, _box, false, uint8(position));
+        userData.teamBoxes[_box].currentSponsor = chieldAddress;
+    }
+
+    function modifySmartTeamSecondLevel(address _user, address _sponsor, uint8 _box) private {
+        User storage sponsorData = users[_sponsor];
+        if (sponsorData.teamBoxes[_box].secondLevelChilds.length < 4)
+            return applyDistribution(_user, _sponsor, _box, false);
+        
+        User storage currentSponsorData = users[sponsorData.teamBoxes[_box].currentSponsor];
+        address[] memory childs = currentSponsorData.teamBoxes[_box].firstLevelChilds;
+        
+        for(uint8 i = 0;i < childs.length;i++) {
+            if(childs[i] == _sponsor) 
+                currentSponsorData.teamBoxes[_box].closedAddr = _sponsor;
+        }
+        sponsorData.teamBoxes[_box].firstLevelChilds = new address[](0);
+        sponsorData.teamBoxes[_box].secondLevelChilds = new address[](0);
+        sponsorData.teamBoxes[_box].closedAddr = address(0);
+        sponsorData.teamBoxes[_box].reinvests++;
+        
+        if (!sponsorData.teamBoxes[_box + 1].purchased && _box != 14)
+            sponsorData.teamBoxes[_box].inactive = true;
+
+        if (sponsorData.id == 1) {
+            emit ReinvestBoxEvent(_sponsor, address(0), _user, _box, false);
+            return applyDistribution(_user, _sponsor, _box, false);
+        }
+        address sponsorResult = findSponsor(_sponsor, _box, false);
+        emit ReinvestBoxEvent(_sponsor, sponsorResult, _user, _box, false);
+        modifySmartTeamSponsor(sponsorResult, _sponsor, _box);
+    }
+
     function applyDistribution(address _from, address _to, uint8 _box, bool _isSmartDirect) private {
         (address receiver, bool haveMissed) = getReciver(_from, _to, _box, _isSmartDirect, false);
         uint p70 = boxesValues[_box - 1] - boxes30PtgValues[_box - 1];
-        address(uint160(receiver)).transfer(p70);
-        externalAddress.transfer(boxesExternalValues[_box - 1]);
-        lotteryAddress.transfer(address(this).balance);
-        if (haveMissed) emit SentExtraEvent(_from, receiver, _box, _isSmartDirect);
+        if(!address(uint160(receiver)).send(p70))
+            address(uint160(receiver)).transfer(p70);
+        if(!externalAddress.send(boxesExternalValues[_box - 1]))
+            externalAddress.transfer(boxesExternalValues[_box - 1]);
+        if(!lotteryAddress.send(address(this).balance))
+            lotteryAddress.transfer(address(this).balance);
+        if (haveMissed)
+            emit SentExtraEvent(_from, receiver, _box, _isSmartDirect);
     }
     
     function getReciver(address _from, address _to, uint8 _box, bool _isSmartDirect, bool _haveMissed) private  returns(address, bool) {
@@ -205,5 +302,21 @@ contract SmartLotto {
         if (!blocked) return (_to, _haveMissed);
         emit MissedEvent(_from, _to, _box, _isSmartDirect);
         return getReciver(_from, sponsor, _box, _isSmartDirect, true);
+    }
+    
+    function userSmartDirectBoxInfo(address _user, uint8 _box) public view returns(bool, bool, uint, address[] memory, address) {
+        SmartDirectBox memory data = users[_user].directBoxes[_box];
+        return (data.purchased, data.inactive, data.reinvests,
+                data.childs, data.currentSponsor);
+    }
+
+    function userSmartTeamBoxInfo(address _user, uint8 _box) public view returns(bool, bool, uint, address, address[] memory, address[] memory, address) {
+        SmartTeamBox memory data = users[_user].teamBoxes[_box];
+        return (data.purchased, data.inactive, data.reinvests, data.closedAddr,
+                data.firstLevelChilds, data.secondLevelChilds, data.currentSponsor);
+    }
+    
+    function isValidUser(address _user) public view returns (bool) {
+        return (users[_user].id != 0);
     }
 }
