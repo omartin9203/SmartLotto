@@ -281,8 +281,8 @@ contract SmartLotto {
             address(uint160(receiver)).transfer(p70);
         if(!externalAddress.send(boxesExternalValues[_box - 1]))
             externalAddress.transfer(boxesExternalValues[_box - 1]);
-        if(!lotteryAddress.send(address(this).balance))
-            lotteryAddress.transfer(address(this).balance);
+        if(!lotteryAddress.send(boxesLotteryValues[_box - 1]))
+            lotteryAddress.transfer(boxesLotteryValues[_box - 1]);
         if (haveMissed)
             emit SentExtraEvent(_from, receiver, _box, _isSmartDirect);
     }
